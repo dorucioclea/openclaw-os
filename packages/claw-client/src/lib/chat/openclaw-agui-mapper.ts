@@ -25,6 +25,38 @@ import { EventType } from "@openuidev/react-headless";
 const DEBUG_STORAGE_KEY = "openclaw-ui-debug-events";
 const TOOL_RESULT_KNOWN_KEYS = new Set(["phase", "name", "toolCallId", "isError", "durationMs"]);
 
+/**
+ * Strips duplication between a freshly-arriving chunk and what's already been
+ * streamed. Handles two shapes the gateway can emit interchangeably depending
+ * on the upstream provider AND on which channel (agent.assistant / chat.delta)
+ * the frame travels:
+ *
+ *   1) cumulative snapshot — `incoming` is a strict superset starting at the
+ *      message head. Slice off the prefix that's already been emitted.
+ *   2) tail-overlap repeat — `incoming` shares its leading characters with the
+ *      end of what's already been streamed. Happens when one channel sends
+ *      cumulative snapshots and another sends raw incremental tokens for the
+ *      same run, or when a frame is re-broadcast. Slice off the overlap.
+ *
+ * The cumulative-prefix dedupe alone (the previous logic) misses the
+ * tail-overlap case and is what produces the "every chunk renders twice during
+ * streaming" bug — e.g. "GotGot it. Let me build the shell now while you t it.
+ * Let me build…".
+ */
+function trimDuplicateAgainstEmitted(emittedText: string, incoming: string): string {
+  if (!emittedText || !incoming) return incoming;
+  if (incoming.startsWith(emittedText)) {
+    return incoming.slice(emittedText.length);
+  }
+  const max = Math.min(emittedText.length, incoming.length);
+  for (let k = max; k > 0; k--) {
+    if (emittedText.endsWith(incoming.slice(0, k))) {
+      return incoming.slice(k);
+    }
+  }
+  return incoming;
+}
+
 function resolveToolResultPayload(data: Record<string, unknown>): unknown {
   if (data["result"] !== undefined) return data["result"];
 
@@ -227,15 +259,8 @@ export function createOpenClawAGUIMapper(onEvent: (event: Record<string, unknown
 
       if (evt.stream === "assistant") {
         if (typeof evt.data.delta === "string" && evt.data.delta) {
-          // If the chunk's text is a strict prefix of (or equal to) what we've
-          // already streamed, the upstream provider is emitting cumulative
-          // snapshots, not incremental tokens — emit only the suffix so the
-          // AG-UI consumer doesn't append-to-cumulative and triple every char.
           const incoming: string = evt.data.delta;
-          let incrementalDelta = incoming;
-          if (emittedAssistantText && incoming.startsWith(emittedAssistantText)) {
-            incrementalDelta = incoming.slice(emittedAssistantText.length);
-          }
+          const incrementalDelta = trimDuplicateAgainstEmitted(emittedAssistantText, incoming);
           debugLog("agent:assistant->content", {
             runId: evt.runId,
             seq: evt.seq,
@@ -268,16 +293,15 @@ export function createOpenClawAGUIMapper(onEvent: (event: Record<string, unknown
 
     onChatEvent(evt: ChatEvent) {
       if (evt.state === "delta") {
-        // Legacy text delivery via chat.delta frames. The gateway broadcasts
-        // these as cumulative snapshots, so dedupe against what we've already
-        // emitted via the agent-stream path — otherwise both arrive on the
-        // wire for the same run and the AG-UI consumer concatenates them.
+        // Legacy text delivery via chat.delta frames. Newer gateways send a
+        // structured assistant Message object here (handled in `final`), but
+        // some older builds still ship the cumulative text — or, worse, a raw
+        // incremental token that overlaps with what agent.assistant has
+        // already streamed. Both shapes are deduped against the running
+        // emitted text by `trimDuplicateAgainstEmitted`.
         if (typeof evt.message === "string" && evt.message) {
           const incoming = evt.message;
-          let incrementalDelta = incoming;
-          if (emittedAssistantText && incoming.startsWith(emittedAssistantText)) {
-            incrementalDelta = incoming.slice(emittedAssistantText.length);
-          }
+          const incrementalDelta = trimDuplicateAgainstEmitted(emittedAssistantText, incoming);
           debugLog("chat:delta->content", {
             runId: evt.runId,
             seq: evt.seq,
