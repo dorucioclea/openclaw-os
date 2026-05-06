@@ -4,6 +4,7 @@
   "description": "Enables Generative UI in the Claw client by injecting the OpenUI Lang system prompt for direct WebSocket chat sessions.",
   "version": "0.1.1",
   "enabledByDefault": true,
+  "activation": { "onStartup": true },
   "contracts": {
     "tools": [
       "create_markdown_artifact",

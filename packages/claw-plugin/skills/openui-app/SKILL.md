@@ -1,23 +1,77 @@
 ---
-name: openui-creator
-description: Create and edit durable apps and artifacts in the workspace using openui-lang Query/Mutation/$variables. Read BEFORE calling `app_create`, `app_update`, `get_app`, or `create_markdown_artifact`. Use when the user asks to build a dashboard, app, interactive view, or save a report/document.
+name: openui-app
+description: Build, edit, or read durable apps in the workspace. REQUIRED before calling `app_create`, `app_update`, `get_app`, or `create_markdown_artifact`. Full reactive surface — `$state`, `Query`, `Mutation`, `@Run`/`@Set`/`@Reset`, scheduled refresh, persistent SQLite. Use for dashboards, briefings, command centers, trackers — any persistent surface the user reopens.
 ---
 
-You are about to create or edit a durable app using openui-lang. The app is persisted via `app_create` / `app_update` and runs independently after creation — the runtime calls tools directly on every refresh with no LLM in the loop.
+You are about to create or edit a durable app using openui-lang — a small DSL specific to this product. Apps persist via `app_create` / `app_update` and run independently after creation; the runtime calls tools directly on every refresh with NO LLM in the loop.
 
-Wrap openui-lang code in triple-backtick fences tagged `openui-lang` when you preview it inline; `app_create`/`app_update` themselves take RAW code (no fences) in the `code` / `patch` argument.
+DSL SHAPE — every program is identifier-equals-component-call assignments:
 
-CRITICAL — Query tool name: The app runtime's `toolProvider` maps tool names directly to plugin handlers. Supported direct tool names are `exec`, `read`, `db_query`, and `db_execute`. Always use `Query("exec", {command: "..."})`, `Query("read", ...)`, `Query("db_query", ...)`, or `Mutation("db_execute", ...)` — never the `tools_invoke` wrapper. **DO NOT invent other tool names.** There is no "fetch", "api", "http", "search", or "invoke" tool.
+  identifier = Component(arg1, arg2)
+  root = Stack([child1, child2])
 
-For KPIs on large or complex datasets, prefer SQL aggregation in a `Query("db_query", {sql: "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active ..."})` over many `@Count/@Sum/@Filter` chains in the UI. Use `@First(query.rows)` to unwrap single-row aggregate results.
+NOT JSX (`<Section>`). NOT object literals (`Section { ... }`). NOT MDX. Your training data does not contain openui-lang.
 
-Durable-object timing: call `app_create` or `app_update` as soon as the payload is ready. Do not wait for your final narrative paragraph before saving. After save succeeds, you can keep streaming explanation, follow-ups, or next steps in the same turn.
+`app_create` and `app_update` take RAW openui-lang in the `code` / `patch` argument — no fences. Wrap in fences (tagged `openui-lang`) only when previewing inline.
 
-`@Run` / `@Set` / `@Reset` take a REFERENCE to a top-level statement, never an inline call. For per-row mutations, route the row id through a `$state`, then sequence `@Set` → `@Run(mutationRef)` → `@Run(refreshQueryRef)` in the button's Action.
+CRITICAL — Query first arg is ONE of these four strings, no exceptions:
+- `"exec"`        — shell. Args: `{command: "..."}`
+- `"read"`        — file read. Args: `{file_path: "..."}`
+- `"db_query"`    — read SQLite. Args: `{sql: "SELECT ...", params?: {...}, namespace?: "default"}`
+- `"db_execute"`  — write SQLite (only inside `Mutation`). Args: `{sql: "INSERT ...", params?: {...}, namespace?: "default"}`
 
-Tables are COLUMN-oriented. `Table([Col("Label", dataArray), Col("Count", countArray, "number")])` — the second `Col` argument is data, not a type label.
+There is NO `"fetch"`, NO `"http"`, NO `"github_pull_requests"`, NO MCP-qualified tool name. To call an external API, write a Node script that calls the API and shells out via `Query("exec", {command: "node ~/.openclaw/workspace/scripts/your-script.js"})`.
 
-Multi-line statements are OK inside brackets `()`, `[]`, `{}` and ternaries — newlines are ignored by the parser.
+`@Run` / `@Set` / `@Reset` take a REFERENCE to a top-level statement, never an inline call. Per-row mutations: route the row id through a `$state`, then sequence `@Set` → `@Run(mutationRef)` → `@Run(refreshQueryRef)`.
+
+Tables are COLUMN-oriented. `Table([Col("Label", dataArray), Col("Count", countArray, "number")])` — the third `Col` arg is a TYPE hint, not a label.
+
+CALL `app_create` IMMEDIATELY when the code is ready. Do not wait for your final paragraph. After the tool returns, keep streaming explanation/follow-ups.
+
+If `app_create` or `app_update` returns `validationErrors`, the code IS saved — but lint flagged issues. ALWAYS fix via a TINY follow-up `app_update` (1–10 statements) with ONLY the corrected statements. The runtime merges by statement name; untouched lines stay put. NEVER re-emit the whole program — that's the failure mode we're avoiding (slower, costs tokens, risks introducing new errors).
+
+LAYOUT — preventing pathologies the renderer can't shrink out of:
+- Max 3 KPI Cards per row, NO wrap. For 4–6 KPIs, use TWO `Stack(..., "row", "m", "stretch")` rows. `wrap=true` on a row of Cards triggers a known interaction with the Card width style that collapses tile text to single characters.
+- Do NOT nest `Stack` directly inside another `Stack` as a flex child. If you need a header with a left block + right block, wrap the inner block in `Card([...], "clear")` so it gets proper flex sizing. (`Stack` itself doesn't set `min-width: 0`, so as a flex child it can't shrink and will overflow.)
+
+KPI STRIP RECIPE — use this exactly. There is no `KPI` / `Metric` / `StatCard` component:
+
+  kpiRow = Stack([k1, k2, k3], "row", "m", "stretch")
+  k1 = Card([TextContent("Open PRs", "small"), TextContent("" + @Count(prs), "large-heavy"), Tag("17 overdue", null, "sm", "warning")], "sunk")
+  k2 = Card([TextContent("MRR", "small"), TextContent("$" + @Round(stripe.mrr, 0), "large-heavy")], "sunk")
+  k3 = Card([TextContent("Runway", "small"), TextContent("" + stripe.runway + " mo", "large-heavy")], "sunk")
+
+For 6 KPIs, two rows: `kpiGrid = Stack([row1, row2], "column", "m", "stretch")` then two row Stacks of 3 each.
+
+SQL — verify columns BEFORE SELECT. Either run `db_query` with `PRAGMA table_info(<table>)` first, or write `SELECT *` and project columns in the UI. NEVER extrapolate column names from a pattern (`churn_count_30d` existing does not mean `churn_count_60d` exists). The runtime fails with `no such column` and your app shows an error.
+
+Multi-line statements are OK inside brackets and ternaries — newlines are ignored by the parser.
+
+COMMON MISTAKES (these will lint-fail or break the render):
+
+- Section { } or <Section>            → Accordion([AccordionItem("id", "Title", [content])]) — there is no SectionBlock in apps
+- Heading("Title")                    → CardHeader("Title", "Subtitle") or TextContent("Title", "large-heavy")
+- KpiCard / KPI / StatCard / Metric   → Card+TextContent recipe above
+- Markdown(...)                       → MarkDownRenderer(...)
+- Badge(...)                          → Tag(text, null, "sm", "info" | "success" | "warning" | "danger")
+- Divider()                           → Separator()
+- Tab(...)                            → TabItem("id", "Trigger", [content])
+- Grid(...)                           → two Stack rows of max 3 children — NOT wrap=true
+- FollowUpBlock / SectionBlock / ListBlock — chat-only; in apps use Accordion / Tabs / @Each(rows, "r", Card([...]))
+- @Map(rows, ...)                     → @Each(rows, "r", ...)
+- @JsonParse / @ParseJSON             → does not exist; Query("exec") auto-parses stdout starting with `{` or `[`
+- @FormatDate / @FormatNumber         → do not exist; use string concat or @Round + concat
+- @Length                             → @Count(array)
+- @Find                               → @First(@Filter(array, "field", "==", value))
+- TabItem("rev", "Revenue", revTab)   → TabItem("rev", "Revenue", [revTab]) — content MUST be an array
+- AccordionItem same                  → three args, content array
+- "col" direction                     → "column" (or omit; column is the default)
+
+ENUM ENFORCEMENT (the lint validates these and reports `validationErrors` on the `app_create` / `app_update` response):
+- Stack/Card direction: `"row"` | `"column"` only
+- Card variant: `"card"` | `"sunk"` | `"clear"` (no `"compact"`/`"primary"`/`"muted"`/`"warning"`)
+- Tag variant: `"neutral"` | `"info"` | `"success"` | `"warning"` | `"danger"` (no `"negative"`/`"positive"`/`"medium"`)
+- TextContent size: `"small"` | `"default"` | `"large"` | `"small-heavy"` | `"large-heavy"` (no `"huge"`)
 
 ## Structured Workflow (follow this order)
 
@@ -1124,7 +1178,7 @@ Call `create_markdown_artifact` as soon as the content is ready so the artifact 
 
 ### When to use what
 
-- **Inline UI** (fenced `openui-lang` via the openui-chat-renderer skill) — quick visualizations, previews, one-off charts.
+- **Inline UI** (fenced `openui-lang` via the openui-inline-ui skill) — quick visualizations, previews, one-off charts.
 - **App** (`app_create`) — dashboards, tools, forms the user will return to. Persistent.
 - **Artifact** (`create_markdown_artifact`) — reports, summaries, documents. Persistent.
 - **Plain text** — questions, explanations, conversation.

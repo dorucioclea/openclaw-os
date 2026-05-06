@@ -1396,6 +1396,18 @@ function ChatAppInner({
   const route = useHashRoute() ?? { view: "home" as const };
   const isMobile = useIsMobile();
   const { threads, selectedThreadId, selectThread, loadThreads } = useThreadList();
+  const innerArtifactStore = useArtifactStore();
+
+  // Close any in-thread artifact preview when navigating to a sidebar view that
+  // doesn't render an `ArtifactPortalTarget`. Without this, `Shell.ThreadContainer`
+  // still sees `isArtifactActive` and keeps the chat-side column at 420px,
+  // leaving a blank ~2/3 of the screen on /crons, /agents, etc.
+  useEffect(() => {
+    const viewKeepsArtifact = route.view === "chat" || route.view === "app" || route.view === "artifact";
+    if (viewKeepsArtifact) return;
+    const id = innerArtifactStore.getState().activeArtifactId;
+    if (id) innerArtifactStore.getState().closeArtifact(id);
+  }, [route.view, innerArtifactStore]);
   const selectedThreadIsRunning = useThread((state) => state.isRunning);
   const dispatchChatProcessMessage = useThread((state) => state.processMessage);
 

@@ -346,17 +346,18 @@ export function AppDetail({
       </TopBar>
 
       <div className="min-h-0 flex-1 overflow-auto p-ml">
-        {renderErrors.length > 0 && (
-          <div className="mb-4">
-            <Callout
-              variant="danger"
-              title="This app has render errors"
-              description={renderErrors[0] ?? "Renderer error"}
-            />
-          </div>
-        )}
 
         {debugOpen && (
+          <>
+          {renderErrors.length > 0 && (
+            <div className="mb-4">
+              <Callout
+                variant="danger"
+                title="This app has render errors"
+                description={renderErrors[0] ?? "Renderer error"}
+              />
+            </div>
+          )}
           <div className="mb-4">
             <AppDebugPanel
               log={toolLog.log}
@@ -364,6 +365,7 @@ export function AppDetail({
               onClose={() => setDebugOpen(false)}
             />
           </div>
+          </>
         )}
 
         {viewMode === "preview" ? (

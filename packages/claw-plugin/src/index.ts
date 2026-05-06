@@ -28,42 +28,55 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 const CLAW_PREAMBLE = `# Claw client — Generative UI is your default for visual answers
 
-This chat is rendered by the Claw client. The user is here **specifically because** they want answers as interactive UI, not walls of text. Two skills give you the language to do that. **Treat them as required reading whenever a request matches their triggers.**
+This chat is rendered by the Claw client. The user is here specifically because they want answers as interactive UI, not walls of text. Two skills give you the language to do that.
 
-## Skills you MUST use
+## openui-lang — a DSL you do NOT know from training
 
-### \`openui-chat-renderer\` — inline UI inside an assistant message
-Read this skill (\`read\` the file at \`skills/openui-chat-renderer/SKILL.md\` from the Claw plugin) **before responding** whenever ANY of these triggers fire:
+Generative UI on this client uses \`openui-lang\` — a small assignment-based DSL specific to this product. **Your training data does not contain it.** Always \`read\` the relevant skill before emitting any code; do not guess the syntax from JSX, MDX, or other component DSLs.
 
-- The user asks for a **chart, graph, plot, trend, comparison, dashboard view, table, breakdown, KPI, metrics, summary, or visualization**.
-- The user asks you to **compare** two or more things, **show** something, or **render** something.
-- The user mentions a **stock ticker, price, market, portfolio, ranking, leaderboard, or any series of numbers**.
-- You're about to collect **multi-field input from the user** (destination + dates, name + email + role, filters, settings) → render a **Form** with FormControls + a submit Button. Do NOT respond with a numbered bullet list of questions.
-- Your answer would be **longer than ~10 lines**, contain **logs / diffs / JSON / multi-step plans / nested lists** → wrap each chunk in a collapsible **\`Section\` / accordion** so the chat stays scannable. Use accordions to **minify long responses**.
-- You want to suggest **next actions / follow-up prompts** → render \`FollowUp\` chips.
+## Skills
 
-When triggered, your response MUST contain an \`\`\`openui-lang fenced block. Plain markdown is the wrong choice for these cases — the user explicitly opted into a UI surface.
+### \`openui-inline-ui\` — UI inside an assistant message
+Read \`skills/openui-inline-ui/SKILL.md\` BEFORE responding when any of these fire:
+- Chart, graph, plot, trend, comparison, breakdown, summary, table, KPI, metric — the user wants to *see* the answer.
+- Multi-field input ("plan a trip", "fill out X", "set up Y") → render a Form with FormControls + submit Button. Never a numbered question list.
+- Answer would exceed ~10 lines → wrap in \`SectionBlock([SectionItem(...)])\` accordion.
+- Suggesting next actions → end with \`FollowUpBlock([FollowUpItem(...)])\`.
 
-### \`openui-creator\` — durable, persistent apps the user opens repeatedly
-Read this skill (\`read\` the file at \`skills/openui-creator/SKILL.md\`) **before calling** \`app_create\`, \`app_update\`, \`get_app\`, or \`create_markdown_artifact\`. Trigger it whenever the user asks for something they'll *come back to*:
+When triggered, your response MUST contain an \`\`\`openui-lang fenced block.
 
-- "**briefing**", "**dashboard**", "**command center**", "**war room**", "**monitor**", "**tracker**", "**hub**", "**inbox**", "**control panel**", "**review queue**", "**daily digest**", "**health check**", "**status board**" — any persistent surface they'll open repeatedly.
-- Anything that needs **live data (Query)**, **mutations / action buttons** that fire back to you, or **stateful controls** that survive across page reloads.
-- Killer use cases this is built for: morning briefings (weather + calendar + email triage), social media monitoring (live feed + sentiment + recommended actions), trading desks (position cards + risk analysis + price history), SEO command centers (rankings + content gaps), DevOps boards (PRs + deploys + tickets), founder dashboards (MRR + churn + runway), relationship hubs (contact timelines + drafted replies). When asked for any of these, **build an app, not a chat reply**.
+### \`openui-app\` — durable, persistent apps the user opens repeatedly
+Read \`skills/openui-app/SKILL.md\` BEFORE calling \`app_create\`, \`app_update\`, \`get_app\`. Trigger phrases:
+- "briefing", "morning briefing", "Monday morning view", "before standup", "daily digest"
+- "dashboard", "command center", "war room", "monitor", "tracker", "control panel", "status board", "hub"
+- Anything needing live data (Query), write actions (Mutation), or stateful controls that survive reload
+- Killer use cases: morning briefings (email + calendar + alerts), engineering command centers (PRs + CI + Linear), founder dashboards (MRR + churn + runway), portfolio dashboards, SEO content planners, social media monitoring
+
+When triggered, **call \`app_create\` immediately once the code is ready** — do not finish narrating first.
+
+## Cross-cutting rules (apply even before you read the skills)
+
+1. \`"col"\` is NOT a valid Stack/Card direction. Use \`"column"\` (or omit — column is the default). \`"vertical"\`/\`"horizontal"\`/\`"v"\`/\`"h"\` are also invalid; only \`"row"\` and \`"column"\`.
+
+2. These names DO NOT EXIST anywhere: \`Heading\`, \`KpiCard\`/\`KPI\`/\`StatCard\`/\`Metric\` (build KPIs as \`Card([TextContent(label, "small"), TextContent(value, "large-heavy")], "sunk")\`), \`Section\` (the type is \`SectionBlock\` in chat / \`Accordion\` in apps), \`Markdown\` (use \`MarkDownRenderer\`), \`Badge\` (use \`Tag\`), \`Divider\` (use \`Separator\`), \`Tab\` (use \`TabItem\`), \`Grid\`. \`@Map\` (use \`@Each\`), \`@FormatDate\`/\`@FormatNumber\`/\`@JsonParse\`/\`@Length\`/\`@Find\` are not real builtins.
+
+3. Inside \`MarkDownRenderer(...)\` text strings, NEVER include triple-backticks. They close the outer \`\`\`openui-lang fence early and the rest of your code renders as raw markdown text. Use single backticks for inline code, or describe code in prose. (Inline-only concern — \`app_create\` takes raw code so the fence collision can't happen there.)
+
+4. \`app_create\` and \`app_update\` both validate code and report \`validationErrors\` in their response. The app IS saved either way. To fix lint failures, ALWAYS call \`app_update\` with ONLY the corrected statements (typically 1–10 lines) — the runtime merges by statement name. NEVER re-emit the whole program; that's slower and risks introducing new errors.
+
+5. The \`openui-inline-ui\` surface is STATIC: no \`Query\`, no \`Mutation\`, no \`$state\`. If you need live data, refresh, or write operations, use \`openui-app\` instead.
 
 ## Refine flow
 
-When the composer text starts with \`Refine app "..." (id: ...)\` or \`Refine artifact "..." (id: ...)\`, the user is iterating on an existing surface. Read the openui-creator skill, then call \`app_update\` (apps) or \`create_markdown_artifact\` (artifacts) with that exact id. Do not create a new one.
+When the composer text starts with \`Refine app "..." (id: ...)\` or \`Refine artifact "..." (id: ...)\`, the user is iterating on an existing surface. Read \`openui-app\`, then call \`app_update\` (apps) or \`update_markdown_artifact\` (artifacts) with that exact id. Do not create a new one. The patch should be 1–10 statements; never re-emit the whole program.
 
-## When NOT to use UI
+## When NOT to render UI
 
 - Conversational chat ("hi", "thanks", "what do you mean by X").
 - Single-sentence factual answers where a chart adds no value.
-- Tool-call output that's already rendered (e.g. file diffs in a tool result).
+- Tool-call output already rendered (e.g. file diffs in a tool result).
 
-## The bottom line
-
-Default to plain text only when a visual would be pure decoration. The moment a request smells like data, comparison, structured input, long output, or a recurring surface — read the relevant skill and render UI. Never explain that you can render UI. Just do it.`;
+The bottom line: read the relevant skill BEFORE composing your response. Never explain that you can render UI — just do it.`;
 
 function sanitizeDbSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "_");
@@ -240,8 +253,8 @@ export default definePluginEntry({
 
     // ── Tiny preamble injection ──────────────────────────────────────────────
     // The agent fetches the actual openui-lang prompt body via `read` on the
-    // skill files in `skills/openui-chat-renderer/SKILL.md` and
-    // `skills/openui-creator/SKILL.md`. Openclaw auto-lists those in the
+    // skill files in `skills/openui-inline-ui/SKILL.md` and
+    // `skills/openui-app/SKILL.md`. Openclaw auto-lists those in the
     // `<available_skills>` block, so this hook only adds the two-line nudge
     // that tells the agent which skill to load when.
     api.on("before_prompt_build", (_event, ctx) => {
@@ -382,11 +395,26 @@ export default definePluginEntry({
     };
 
     // ── Lint helper — surface parser errors back to the LLM so it can self-correct ──
+    // Both `app_create` and `app_update` save the code AND report findings.
+    // The agent then fixes via TINY follow-up `app_update` patches that
+    // contain ONLY the corrected statements (the runtime merges by statement
+    // name). Re-emitting the whole program is the failure mode we're fighting
+    // — small patches are cheaper, faster, and don't risk introducing new
+    // errors elsewhere in the program.
     const buildLintPayload = (report: LintReport): Record<string, unknown> => {
       if (report.ok) return {};
+      // If the agent emitted ≥5 findings it likely hasn't read the skill yet —
+      // nudge it to load the skill before patching, otherwise the patches
+      // will keep landing on bad ground. Cheap one-liner; costs nothing if
+      // the skill was already read.
+      const skillNudge =
+        report.findings.length >= 5
+          ? " If you haven't already, `read` the relevant skill (`skills/openui-app/SKILL.md` or `skills/openui-inline-ui/SKILL.md`) before patching — most of these are catalog/syntax issues the skill covers."
+          : "";
       return {
         validationErrors: report.findings,
-        correction: `Your app code has ${report.findings.length} validation issue(s). Read the \`message\` and \`hint\` on each finding, then call \`app_update\` with ONLY the corrected statements — the merge is by statement name, so untouched lines don't need to be resent.`,
+        correction: `Your code has ${report.findings.length} validation issue(s). The app IS saved — read each finding's \`message\` and \`hint\`, then call \`app_update\` with ONLY the corrected statements (typically 1–10 lines). The runtime merges by statement name, so untouched lines stay put. NEVER re-emit the whole program.${skillNudge}`,
+        ...(report.hint ? { hallucinationPrimer: report.hint } : {}),
       };
     };
 
@@ -588,6 +616,10 @@ export default definePluginEntry({
             `[openclaw-os-plugin] app_create lint: ${lint.findings.length} finding(s) — ${lint.summary.slice(0, 180)}`,
           );
         }
+        // Save unconditionally and surface lint findings back to the agent.
+        // Rejecting outright forces full-rewrite retries, which is the
+        // failure mode we're trying to avoid — small `app_update` patches
+        // are the right loop.
         const app = await getAppStore().create({
           title: params.title,
           content: params.code,

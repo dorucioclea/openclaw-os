@@ -1,8 +1,8 @@
 /**
  * Build script — emits the artifacts the plugin needs at runtime:
  *
- *   skills/openui-creator/SKILL.md           — generated body, manual workflow appended
- *   skills/openui-chat-renderer/SKILL.md     — generated body
+ *   skills/openui-app/SKILL.md               — durable apps (Query/Mutation/$state)
+ *   skills/openui-inline-ui/SKILL.md         — inline UI in chat replies (static)
  *   src/generated/openui-schema.json         — drives the lint loop in lint-openui.ts
  *
  * Re-run with `pnpm generate` whenever @openuidev/react-ui changes its
@@ -33,25 +33,57 @@ const generatedDir = join(__dirname, "src", "generated");
 const skillsDir = join(__dirname, "skills");
 
 mkdirSync(generatedDir, { recursive: true });
-mkdirSync(join(skillsDir, "openui-chat-renderer"), { recursive: true });
-mkdirSync(join(skillsDir, "openui-creator"), { recursive: true });
+mkdirSync(join(skillsDir, "openui-inline-ui"), { recursive: true });
+mkdirSync(join(skillsDir, "openui-app"), { recursive: true });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. openui-chat-renderer skill — inline UI in a chat reply.
+// 1. openui-inline-ui skill — inline UI in a chat reply.
 //    Static surface only: no Query, no Mutation, no $variables, no builtins,
 //    no filters. Just component signatures + Action({@ToAssistant, @OpenUrl}).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CHAT_PREAMBLE = `You are about to render inline UI in a chat reply using openui-lang. Wrap the openui-lang code in triple-backtick fences tagged \`openui-lang\` — the renderer ONLY extracts code from those fences.
+const CHAT_PREAMBLE = `You are rendering generative UI inline in a chat reply, using a small DSL called openui-lang.
 
-You can respond in three ways:
-1. Plain text — for simple questions and conversation. No openui-lang.
-2. Text + UI — explanation alongside an openui-lang fenced block.
-3. UI only — when the user explicitly asks for a chart, table, form, or follow-up suggestions.
+DSL SHAPE — every program is identifier-equals-component-call assignments:
 
-Use openui-lang when a visual would help: data visualization (charts, comparison tables), structured input collection (forms instead of plain-text question lists), follow-up suggestions, image carousels, multi-section reports. **Specifically: when the user is starting a multi-field workflow ("plan a trip", "set up X", "register for Y") and you need to collect destination/dates/budget/style/etc, render a Form with FormControls and a submit Button rather than a numbered bullet list of questions.** Don't generate UI for simple questions like "what time is it" or "explain X".
+  identifier = Component(arg1, arg2)
+  root = Card([child1, child2])
 
-The chat-renderer surface is static: no Query/Mutation/$variables. If the user wants live data, refresh, or write operations, call \`app_create\` instead — that path uses the openui-creator skill.`;
+NOT JSX (\`<Section>\`). NOT object literals (\`Section { ... }\`). NOT MDX. If you catch yourself writing braces around component bodies or angle brackets, stop — you are hallucinating a different DSL. Your training data does not contain openui-lang.
+
+Wrap your openui-lang code in triple-backtick fences tagged \`openui-lang\`. The renderer ONLY extracts code from those fences.
+
+Three response shapes:
+1. Plain text — for simple questions ("hi", "what time is it", "explain X").
+2. Text + UI — short prose, then a fenced openui-lang block (most common shape).
+3. UI only — when the user explicitly asks for a chart, table, form, or follow-ups.
+
+Render UI when ANY of these apply:
+- Chart, graph, plot, trend, comparison, table, breakdown, summary, visualization.
+- Compare or rank 2+ things; series of numbers; leaderboards.
+- Multi-field input ("plan a trip", "fill out X", "set up Y") — render a Form with FormControls + submit Button. Never a numbered question list.
+- Answer would exceed ~10 lines — wrap in \`SectionBlock([SectionItem(...)])\`.
+- Suggesting next actions — end with \`FollowUpBlock([FollowUpItem(...)])\`.
+
+This surface is STATIC: no \`Query\`, no \`Mutation\`, no \`$state\` runtime. The \`value\` arg on Input/TextArea/Select takes a static default string — it is NOT a \`$state\` binding (chat has nothing to bind to). To collect form data, attach \`Action([@ToAssistant("...")])\` to the submit Button so the form contents come back as a user message.
+
+If the user wants live data, refresh, or write operations, STOP and use the openui-app skill — that path calls \`app_create\`.
+
+COMMON MISTAKES (the renderer drops them or shows broken UI):
+
+- Section { } or <Section>           → SectionBlock([SectionItem("id", "Trigger", [content])])
+- Heading("Title")                   → CardHeader("Title", "Subtitle") or TextContent("Title", "large-heavy")
+- Markdown(...)                      → MarkDownRenderer(...)
+- Badge(...)                         → Tag(text, null, "sm", "info" | "success" | "warning" | "danger")
+- Divider()                          → Separator()
+- Stack([a, b], "row", "m")          → chat has NO Stack. Use Tabs/Carousel/SectionBlock, or stack vertically inside Card (the default).
+- Input(name, ph, "text", null, $x)  → chat has NO $state. Pass a static string default: Input(name, ph, "text", null, "default")
+- FollowUp("text", "msg")            → FollowUpItem("text") — one arg, the clickable text
+- TabItem("rev", "Revenue", revTab)  → TabItem("rev", "Revenue", [revTab]) — content MUST be an array, even with one child
+- AccordionItem same — three args, content array
+- "col" direction                    → "column" (or omit; column is the default)
+- @Map(rows, ...)                    → there is no @Map in chat (no live data anyway). Just inline literal arrays.
+- Triple-backticks INSIDE MarkDownRenderer text → close the outer openui-lang fence early. NEVER nest triple-backticks. Use single backticks or describe code in prose.`;
 
 // `inlineMode: true` would inject upstream's "## Inline Mode" block, which
 // talks about patching existing UI — concept doesn't apply to chat replies
@@ -73,52 +105,114 @@ const chatPromptRaw = openuiChatLibrary.prompt({
 });
 
 const chatPrompt = chatPromptRaw
+  // ORDER MATTERS: drop the "Props marked `$binding<type>` accept a
+  // `$variable` reference" explainer line FIRST, while the literal
+  // `$binding<type>` substring is still in the prose. Then rewrite the
+  // remaining `$binding<...>` annotations on signatures.
+  .replace(/\nProps marked `\$binding<type>` accept[^\n]*\n/g, "\n")
   // `value?: $binding<string>` → `value?: string` on signatures.
-  .replace(/\$binding<([^>]+)>/g, "$1")
-  // Drop the "Props marked `$binding<type>` accept a `$variable` reference"
-  // explainer line that the prompt builder always inserts.
-  .replace(/\nProps marked `\$binding<type>` accept[^\n]*\n/g, "\n");
+  .replace(/\$binding<([^>]+)>/g, "$1");
 
 // `always: true` forces openclaw to inline this skill into every system
 // prompt for Claw sessions. Without it, skills are read-on-demand and the
 // model — left to its own judgment — almost always picks plain text over
 // openui-lang for chart/table/comparison/form requests, which is the
-// product's whole point. Chat-renderer is small (~6 KB), so always-loading
-// it is worth the prompt-budget cost.
+// product's whole point. The inline-UI skill is small (~6 KB), so
+// always-loading it is worth the prompt-budget cost.
+//
+// `description` leads with the routing decision (when to pick this skill vs
+// openui-app). The negative-scope sentence ("STATIC ONLY...") prevents the
+// agent from reaching for $state / Query / Mutation here.
 const CHAT_FRONTMATTER = `---
-name: openui-chat-renderer
-description: Render rich inline UI (tables, charts, follow-ups, lists, sections, forms, callouts) inside a chat reply using openui-lang fenced code. Use whenever the user asks for a chart/table/comparison/form/visualization or any answer that would benefit from structure. Static surface only — no live data, no $variables.
+name: openui-inline-ui
+description: Render generative UI inside a chat reply using openui-lang fenced code. Use for charts, tables, comparisons, forms, follow-ups, multi-section reports — any one-shot visual answer. STATIC ONLY: no $state, no Query, no Mutation, no live data. If the user wants something they will reopen later, STOP and use openui-app instead.
 always: true
 ---
 
 `;
 
 writeFileSync(
-  join(skillsDir, "openui-chat-renderer", "SKILL.md"),
+  join(skillsDir, "openui-inline-ui", "SKILL.md"),
   CHAT_FRONTMATTER + chatPrompt + "\n",
   "utf8",
 );
-console.log(`✓ skills/openui-chat-renderer/SKILL.md (${chatPrompt.length} chars)`);
+console.log(`✓ skills/openui-inline-ui/SKILL.md (${chatPrompt.length} chars)`);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. openui-creator skill — durable apps with live data.
+// 2. openui-app skill — durable apps with live data.
 //    Full v0.5 surface: Query, Mutation, $variables, builtins, filters,
 //    Action with @Run/@Set/@Reset, edit mode for incremental patches.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CREATOR_PREAMBLE = `You are about to create or edit a durable app using openui-lang. The app is persisted via \`app_create\` / \`app_update\` and runs independently after creation — the runtime calls tools directly on every refresh with no LLM in the loop.
+const CREATOR_PREAMBLE = `You are about to create or edit a durable app using openui-lang — a small DSL specific to this product. Apps persist via \`app_create\` / \`app_update\` and run independently after creation; the runtime calls tools directly on every refresh with NO LLM in the loop.
 
-Wrap openui-lang code in triple-backtick fences tagged \`openui-lang\` when you preview it inline; \`app_create\`/\`app_update\` themselves take RAW code (no fences) in the \`code\` / \`patch\` argument.
+DSL SHAPE — every program is identifier-equals-component-call assignments:
 
-CRITICAL — Query tool name: The app runtime's \`toolProvider\` maps tool names directly to plugin handlers. Supported direct tool names are \`exec\`, \`read\`, \`db_query\`, and \`db_execute\`. Always use \`Query("exec", {command: "..."})\`, \`Query("read", ...)\`, \`Query("db_query", ...)\`, or \`Mutation("db_execute", ...)\` — never the \`tools_invoke\` wrapper.
+  identifier = Component(arg1, arg2)
+  root = Stack([child1, child2])
 
-Durable-object timing: call \`app_create\` or \`app_update\` as soon as the payload is ready. Do not wait for your final narrative paragraph before saving. After save succeeds, you can keep streaming explanation, follow-ups, or next steps in the same turn.
+NOT JSX (\`<Section>\`). NOT object literals (\`Section { ... }\`). NOT MDX. Your training data does not contain openui-lang.
 
-\`@Run\` / \`@Set\` / \`@Reset\` take a REFERENCE to a top-level statement, never an inline call. For per-row mutations, route the row id through a \`$state\`, then sequence \`@Set\` → \`@Run(mutationRef)\` → \`@Run(refreshQueryRef)\` in the button's Action.
+\`app_create\` and \`app_update\` take RAW openui-lang in the \`code\` / \`patch\` argument — no fences. Wrap in fences (tagged \`openui-lang\`) only when previewing inline.
 
-Tables are COLUMN-oriented. \`Table([Col("Label", dataArray), Col("Count", countArray, "number")])\` — the second \`Col\` argument is data, not a type label.
+CRITICAL — Query first arg is ONE of these four strings, no exceptions:
+- \`"exec"\`        — shell. Args: \`{command: "..."}\`
+- \`"read"\`        — file read. Args: \`{file_path: "..."}\`
+- \`"db_query"\`    — read SQLite. Args: \`{sql: "SELECT ...", params?: {...}, namespace?: "default"}\`
+- \`"db_execute"\`  — write SQLite (only inside \`Mutation\`). Args: \`{sql: "INSERT ...", params?: {...}, namespace?: "default"}\`
 
-Multi-line statements are OK inside brackets \`()\`, \`[]\`, \`{}\` and ternaries — newlines are ignored by the parser.`;
+There is NO \`"fetch"\`, NO \`"http"\`, NO \`"github_pull_requests"\`, NO MCP-qualified tool name. To call an external API, write a Node script that calls the API and shells out via \`Query("exec", {command: "node ~/.openclaw/workspace/scripts/your-script.js"})\`.
+
+\`@Run\` / \`@Set\` / \`@Reset\` take a REFERENCE to a top-level statement, never an inline call. Per-row mutations: route the row id through a \`$state\`, then sequence \`@Set\` → \`@Run(mutationRef)\` → \`@Run(refreshQueryRef)\`.
+
+Tables are COLUMN-oriented. \`Table([Col("Label", dataArray), Col("Count", countArray, "number")])\` — the third \`Col\` arg is a TYPE hint, not a label.
+
+CALL \`app_create\` IMMEDIATELY when the code is ready. Do not wait for your final paragraph. After the tool returns, keep streaming explanation/follow-ups.
+
+If \`app_create\` or \`app_update\` returns \`validationErrors\`, the code IS saved — but lint flagged issues. ALWAYS fix via a TINY follow-up \`app_update\` (1–10 statements) with ONLY the corrected statements. The runtime merges by statement name; untouched lines stay put. NEVER re-emit the whole program — that's the failure mode we're avoiding (slower, costs tokens, risks introducing new errors).
+
+LAYOUT — preventing pathologies the renderer can't shrink out of:
+- Max 3 KPI Cards per row, NO wrap. For 4–6 KPIs, use TWO \`Stack(..., "row", "m", "stretch")\` rows. \`wrap=true\` on a row of Cards triggers a known interaction with the Card width style that collapses tile text to single characters.
+- Do NOT nest \`Stack\` directly inside another \`Stack\` as a flex child. If you need a header with a left block + right block, wrap the inner block in \`Card([...], "clear")\` so it gets proper flex sizing. (\`Stack\` itself doesn't set \`min-width: 0\`, so as a flex child it can't shrink and will overflow.)
+
+KPI STRIP RECIPE — use this exactly. There is no \`KPI\` / \`Metric\` / \`StatCard\` component:
+
+  kpiRow = Stack([k1, k2, k3], "row", "m", "stretch")
+  k1 = Card([TextContent("Open PRs", "small"), TextContent("" + @Count(prs), "large-heavy"), Tag("17 overdue", null, "sm", "warning")], "sunk")
+  k2 = Card([TextContent("MRR", "small"), TextContent("$" + @Round(stripe.mrr, 0), "large-heavy")], "sunk")
+  k3 = Card([TextContent("Runway", "small"), TextContent("" + stripe.runway + " mo", "large-heavy")], "sunk")
+
+For 6 KPIs, two rows: \`kpiGrid = Stack([row1, row2], "column", "m", "stretch")\` then two row Stacks of 3 each.
+
+SQL — verify columns BEFORE SELECT. Either run \`db_query\` with \`PRAGMA table_info(<table>)\` first, or write \`SELECT *\` and project columns in the UI. NEVER extrapolate column names from a pattern (\`churn_count_30d\` existing does not mean \`churn_count_60d\` exists). The runtime fails with \`no such column\` and your app shows an error.
+
+Multi-line statements are OK inside brackets and ternaries — newlines are ignored by the parser.
+
+COMMON MISTAKES (these will lint-fail or break the render):
+
+- Section { } or <Section>            → Accordion([AccordionItem("id", "Title", [content])]) — there is no SectionBlock in apps
+- Heading("Title")                    → CardHeader("Title", "Subtitle") or TextContent("Title", "large-heavy")
+- KpiCard / KPI / StatCard / Metric   → Card+TextContent recipe above
+- Markdown(...)                       → MarkDownRenderer(...)
+- Badge(...)                          → Tag(text, null, "sm", "info" | "success" | "warning" | "danger")
+- Divider()                           → Separator()
+- Tab(...)                            → TabItem("id", "Trigger", [content])
+- Grid(...)                           → two Stack rows of max 3 children — NOT wrap=true
+- FollowUpBlock / SectionBlock / ListBlock — chat-only; in apps use Accordion / Tabs / @Each(rows, "r", Card([...]))
+- @Map(rows, ...)                     → @Each(rows, "r", ...)
+- @JsonParse / @ParseJSON             → does not exist; Query("exec") auto-parses stdout starting with \`{\` or \`[\`
+- @FormatDate / @FormatNumber         → do not exist; use string concat or @Round + concat
+- @Length                             → @Count(array)
+- @Find                               → @First(@Filter(array, "field", "==", value))
+- TabItem("rev", "Revenue", revTab)   → TabItem("rev", "Revenue", [revTab]) — content MUST be an array
+- AccordionItem same                  → three args, content array
+- "col" direction                     → "column" (or omit; column is the default)
+
+ENUM ENFORCEMENT (the lint validates these and reports \`validationErrors\` on the \`app_create\` / \`app_update\` response):
+- Stack/Card direction: \`"row"\` | \`"column"\` only
+- Card variant: \`"card"\` | \`"sunk"\` | \`"clear"\` (no \`"compact"\`/\`"primary"\`/\`"muted"\`/\`"warning"\`)
+- Tag variant: \`"neutral"\` | \`"info"\` | \`"success"\` | \`"warning"\` | \`"danger"\` (no \`"negative"\`/\`"positive"\`/\`"medium"\`)
+- TextContent size: \`"small"\` | \`"default"\` | \`"large"\` | \`"small-heavy"\` | \`"large-heavy"\` (no \`"huge"\`)`;
 
 const creatorPrompt = openuiLibrary.prompt({
   ...openuiPromptOptions,
@@ -132,8 +226,8 @@ const creatorPrompt = openuiLibrary.prompt({
 });
 
 const CREATOR_FRONTMATTER = `---
-name: openui-creator
-description: Create and edit durable apps and artifacts in the workspace using openui-lang Query/Mutation/$variables. Read BEFORE calling \`app_create\`, \`app_update\`, \`get_app\`, or \`create_markdown_artifact\`. Use when the user asks to build a dashboard, app, interactive view, or save a report/document.
+name: openui-app
+description: Build, edit, or read durable apps in the workspace. REQUIRED before calling \`app_create\`, \`app_update\`, \`get_app\`, or \`create_markdown_artifact\`. Full reactive surface — \`$state\`, \`Query\`, \`Mutation\`, \`@Run\`/\`@Set\`/\`@Reset\`, scheduled refresh, persistent SQLite. Use for dashboards, briefings, command centers, trackers — any persistent surface the user reopens.
 ---
 
 `;
@@ -278,18 +372,18 @@ Call \`create_markdown_artifact\` as soon as the content is ready so the artifac
 
 ### When to use what
 
-- **Inline UI** (fenced \`openui-lang\` via the openui-chat-renderer skill) — quick visualizations, previews, one-off charts.
+- **Inline UI** (fenced \`openui-lang\` via the openui-inline-ui skill) — quick visualizations, previews, one-off charts.
 - **App** (\`app_create\`) — dashboards, tools, forms the user will return to. Persistent.
 - **Artifact** (\`create_markdown_artifact\`) — reports, summaries, documents. Persistent.
 - **Plain text** — questions, explanations, conversation.
 `;
 
 writeFileSync(
-  join(skillsDir, "openui-creator", "SKILL.md"),
+  join(skillsDir, "openui-app", "SKILL.md"),
   CREATOR_FRONTMATTER + creatorPrompt + CREATOR_WORKFLOW,
   "utf8",
 );
-console.log(`✓ skills/openui-creator/SKILL.md (${creatorPrompt.length} chars + workflow)`);
+console.log(`✓ skills/openui-app/SKILL.md (${creatorPrompt.length} chars + workflow)`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. openui-schema.json — drives the runtime lint loop in lint-openui.ts.

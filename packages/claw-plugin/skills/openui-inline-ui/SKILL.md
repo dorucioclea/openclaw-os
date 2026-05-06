@@ -1,19 +1,51 @@
 ---
-name: openui-chat-renderer
-description: Render rich inline UI (tables, charts, follow-ups, lists, sections, forms, callouts) inside a chat reply using openui-lang fenced code. Use whenever the user asks for a chart/table/comparison/form/visualization or any answer that would benefit from structure. Static surface only — no live data, no $variables.
+name: openui-inline-ui
+description: Render generative UI inside a chat reply using openui-lang fenced code. Use for charts, tables, comparisons, forms, follow-ups, multi-section reports — any one-shot visual answer. STATIC ONLY: no $state, no Query, no Mutation, no live data. If the user wants something they will reopen later, STOP and use openui-app instead.
 always: true
 ---
 
-You are about to render inline UI in a chat reply using openui-lang. Wrap the openui-lang code in triple-backtick fences tagged `openui-lang` — the renderer ONLY extracts code from those fences.
+You are rendering generative UI inline in a chat reply, using a small DSL called openui-lang.
 
-You can respond in three ways:
-1. Plain text — for simple questions and conversation. No openui-lang.
-2. Text + UI — explanation alongside an openui-lang fenced block.
-3. UI only — when the user explicitly asks for a chart, table, form, or follow-up suggestions.
+DSL SHAPE — every program is identifier-equals-component-call assignments:
 
-Use openui-lang when a visual would help: data visualization (charts, comparison tables), structured input collection (forms instead of plain-text question lists), follow-up suggestions, image carousels, multi-section reports. **Specifically: when the user is starting a multi-field workflow ("plan a trip", "set up X", "register for Y") and you need to collect destination/dates/budget/style/etc, render a Form with FormControls and a submit Button rather than a numbered bullet list of questions.** Don't generate UI for simple questions like "what time is it" or "explain X".
+  identifier = Component(arg1, arg2)
+  root = Card([child1, child2])
 
-The chat-renderer surface is static: no Query/Mutation/$variables. If the user wants live data, refresh, or write operations, call `app_create` instead — that path uses the openui-creator skill.
+NOT JSX (`<Section>`). NOT object literals (`Section { ... }`). NOT MDX. If you catch yourself writing braces around component bodies or angle brackets, stop — you are hallucinating a different DSL. Your training data does not contain openui-lang.
+
+Wrap your openui-lang code in triple-backtick fences tagged `openui-lang`. The renderer ONLY extracts code from those fences.
+
+Three response shapes:
+1. Plain text — for simple questions ("hi", "what time is it", "explain X").
+2. Text + UI — short prose, then a fenced openui-lang block (most common shape).
+3. UI only — when the user explicitly asks for a chart, table, form, or follow-ups.
+
+Render UI when ANY of these apply:
+- Chart, graph, plot, trend, comparison, table, breakdown, summary, visualization.
+- Compare or rank 2+ things; series of numbers; leaderboards.
+- Multi-field input ("plan a trip", "fill out X", "set up Y") — render a Form with FormControls + submit Button. Never a numbered question list.
+- Answer would exceed ~10 lines — wrap in `SectionBlock([SectionItem(...)])`.
+- Suggesting next actions — end with `FollowUpBlock([FollowUpItem(...)])`.
+
+This surface is STATIC: no `Query`, no `Mutation`, no `$state` runtime. The `value` arg on Input/TextArea/Select takes a static default string — it is NOT a `$state` binding (chat has nothing to bind to). To collect form data, attach `Action([@ToAssistant("...")])` to the submit Button so the form contents come back as a user message.
+
+If the user wants live data, refresh, or write operations, STOP and use the openui-app skill — that path calls `app_create`.
+
+COMMON MISTAKES (the renderer drops them or shows broken UI):
+
+- Section { } or <Section>           → SectionBlock([SectionItem("id", "Trigger", [content])])
+- Heading("Title")                   → CardHeader("Title", "Subtitle") or TextContent("Title", "large-heavy")
+- Markdown(...)                      → MarkDownRenderer(...)
+- Badge(...)                         → Tag(text, null, "sm", "info" | "success" | "warning" | "danger")
+- Divider()                          → Separator()
+- Stack([a, b], "row", "m")          → chat has NO Stack. Use Tabs/Carousel/SectionBlock, or stack vertically inside Card (the default).
+- Input(name, ph, "text", null, $x)  → chat has NO $state. Pass a static string default: Input(name, ph, "text", null, "default")
+- FollowUp("text", "msg")            → FollowUpItem("text") — one arg, the clickable text
+- TabItem("rev", "Revenue", revTab)  → TabItem("rev", "Revenue", [revTab]) — content MUST be an array, even with one child
+- AccordionItem same — three args, content array
+- "col" direction                    → "column" (or omit; column is the default)
+- @Map(rows, ...)                    → there is no @Map in chat (no live data anyway). Just inline literal arrays.
+- Triple-backticks INSIDE MarkDownRenderer text → close the outer openui-lang fence early. NEVER nest triple-backticks. Use single backticks or describe code in prose.
 
 ## Syntax Rules
 
@@ -30,7 +62,6 @@ The chat-renderer surface is static: no Query/Mutation/$variables. If the user w
 
 Arguments marked with ? are optional. Sub-components can be inline or referenced; prefer references for better streaming.
 Props typed `ActionExpression` accept an Action([@steps...]) expression. See the Action section for available steps (@ToAssistant, @OpenUrl).
-Props marked `type` accept a `$variable` reference for two-way binding.
 
 ### Content
 CardHeader(title?: string, subtitle?: string) — Header with optional title and subtitle
