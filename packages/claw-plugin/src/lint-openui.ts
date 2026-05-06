@@ -363,7 +363,8 @@ function walkEnumValidation(parsed: ParseResult): LintFinding[] {
     // Generic object — recurse keys; track statement-id hints when present
     for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
       const nextHint =
-        statementHint ?? (typeof key === "string" && /^[a-z][a-zA-Z0-9_]*$/.test(key) ? key : undefined);
+        statementHint ??
+        (typeof key === "string" && /^[a-z][a-zA-Z0-9_]*$/.test(key) ? key : undefined);
       visit(value, nextHint);
     }
   };
@@ -384,15 +385,12 @@ const COMPONENT_REPLACEMENTS: Record<string, string> = {
     "SectionBlock([SectionItem(...)]) in chat / Accordion([AccordionItem(...)]) in apps — there is no plain Section",
   KpiCard:
     'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk") — there is no KPI component, this is the recipe',
-  KPICard:
-    'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
+  KPICard: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
   KPI: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
-  StatCard:
-    'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
+  StatCard: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
   Stat: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
   Metric: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
-  KeyValue:
-    'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
+  KeyValue: 'Card([TextContent("Label", "small"), TextContent(value, "large-heavy")], "sunk")',
   KeyValueList:
     "Stack of Cards with the KPI recipe (Card([TextContent(label,'small'), TextContent(value,'large-heavy')], 'sunk'))",
   Markdown: "MarkDownRenderer",

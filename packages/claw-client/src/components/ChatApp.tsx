@@ -1403,7 +1403,8 @@ function ChatAppInner({
   // still sees `isArtifactActive` and keeps the chat-side column at 420px,
   // leaving a blank ~2/3 of the screen on /crons, /agents, etc.
   useEffect(() => {
-    const viewKeepsArtifact = route.view === "chat" || route.view === "app" || route.view === "artifact";
+    const viewKeepsArtifact =
+      route.view === "chat" || route.view === "app" || route.view === "artifact";
     if (viewKeepsArtifact) return;
     const id = innerArtifactStore.getState().activeArtifactId;
     if (id) innerArtifactStore.getState().closeArtifact(id);
