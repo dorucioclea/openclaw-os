@@ -3,6 +3,6 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src/**/*", "generate-prompt.ts"],
-  "exclude": ["node_modules", "src/generated"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "src/generated", "generate-prompt.ts"]
 }

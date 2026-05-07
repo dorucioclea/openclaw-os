@@ -37,20 +37,9 @@ After the first install, add `openclaw-os-plugin` to `plugins.allow` in `~/.open
 
 Open the UI at `http://localhost:18789/plugins/openclawos`. Paste the gateway URL (`ws://localhost:18789`) and the auth token from `~/.openclaw/openclaw.json` into the Settings dialog on first load. To skip the dialog and get a pre-authenticated URL with the token in the fragment (mirrors `openclaw dashboard`), run `node ../../scripts/open-ui.mjs` from the workspace root.
 
-## Regenerating the system prompt
-
-The OpenUI Lang system prompt is generated from `@openuidev/react-ui`'s component library. Re-run after upgrading that package:
-
-```sh
-pnpm generate
-```
-
-This rewrites `src/generated/system-prompt.ts` in place. Commit the result.
-
 ## Scripts
 
 ```sh
-pnpm generate       # regenerate src/generated/system-prompt.ts
 pnpm bundle-ui      # build claw-client and copy out/ → ./static/
 pnpm build          # esbuild bundle src/index.ts → dist/index.js
 pnpm lint:check     # ESLint
@@ -79,7 +68,6 @@ packages/claw-plugin/
 ├── skills/                     # OpenUI Lang skill instructions
 │   ├── openui-chat-renderer/SKILL.md
 │   └── openui-creator/SKILL.md
-├── generate-prompt.ts          # build-time prompt generator
 ├── openclaw.plugin.json        # plugin manifest
 └── package.json
 ```

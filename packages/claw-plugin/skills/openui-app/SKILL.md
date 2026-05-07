@@ -47,7 +47,7 @@ SQL — verify columns BEFORE SELECT. Either run `db_query` with `PRAGMA table_i
 
 Multi-line statements are OK inside brackets and ternaries — newlines are ignored by the parser.
 
-COMMON MISTAKES (these will lint-fail or break the render):
+NAME ALIASES (you typed X — write Y. These will lint-fail or render wrong):
 
 - Section { } or <Section>            → Accordion([AccordionItem("id", "Title", [content])]) — there is no SectionBlock in apps
 - Heading("Title")                    → CardHeader("Title", "Subtitle") or TextContent("Title", "large-heavy")
@@ -58,7 +58,6 @@ COMMON MISTAKES (these will lint-fail or break the render):
 - Tab(...)                            → TabItem("id", "Trigger", [content])
 - Grid(...)                           → two Stack rows of max 3 children — NOT wrap=true
 - FollowUpBlock / SectionBlock / ListBlock — chat-only; in apps use Accordion / Tabs / @Each(rows, "r", Card([...]))
-- @Map(rows, ...)                     → @Each(rows, "r", ...)
 - @JsonParse / @ParseJSON             → does not exist; Query("exec") auto-parses stdout starting with `{` or `[`
 - @FormatDate / @FormatNumber         → do not exist; use string concat or @Round + concat
 - @Length                             → @Count(array)
@@ -72,6 +71,39 @@ ENUM ENFORCEMENT (the lint validates these and reports `validationErrors` on the
 - Card variant: `"card"` | `"sunk"` | `"clear"` (no `"compact"`/`"primary"`/`"muted"`/`"warning"`)
 - Tag variant: `"neutral"` | `"info"` | `"success"` | `"warning"` | `"danger"` (no `"negative"`/`"positive"`/`"medium"`)
 - TextContent size: `"small"` | `"default"` | `"large"` | `"small-heavy"` | `"large-heavy"` (no `"huge"`)
+
+## Before You Build — three intuitions
+
+These are the difference between a one-shot success and a re-do loop. Apply BEFORE writing any code.
+
+**1. Config-first when needed.** If the app concept needs values you don't have (watchlist symbols, monthly burn, target repos, key thresholds, your timezone), emit an inline `Form` in chat FIRST via the `openui-inline-ui` skill, then call `app_create` once the user submits. Bake the collected values into Query defaults or a `config` table. Don't guess defaults that won't match the user's reality.
+Skip the form when (a) the request is already self-describing, or (b) the config is multi-row mutable state (that belongs in an in-app Form, not pre-create).
+
+**2. Periodic data → propose cron in the same response.** Trigger phrases: "every morning", "Monday", "daily", "before I open it", "while I sleep", "8am", "pre-fetched", "weekly". Don't wait to be asked. Same rule for **heavy scripts**: slow APIs (>3s), paginated >50 items, multi-source serial calls. The pattern is always the same:
+- Cron runs the heavy script on schedule → upsert results into a SQLite snapshot table.
+- The app reads from that table via `db_query` (instant load) instead of refetching live.
+- Live `Query("exec")` is fine for fast / lightweight scripts where re-fetching on open is cheap.
+- Same logic applies to AI narrative ("what do these numbers mean together?"): for periodic dashboards, write the narrative via cron into a `narratives` table — see "@ToAssistant vs cron-narrative" in the Action area for the full decision rule.
+
+**3. Setup-required gate over silent zeroes.** Scripts that need a key from `~/.openclaw/workspace/.env` MUST detect a missing key and return a JSON shape with an explicit error tag — not zeroed defaults. Otherwise the dashboard silently lies.
+
+```javascript
+// scripts/<source>.js
+if (!process.env.STRIPE_SECRET_KEY) {
+  console.log(JSON.stringify({error: "SETUP_REQUIRED", envVar: "STRIPE_SECRET_KEY", mrr: 0, churn: 0, customers: []}));
+  process.exit(0);
+}
+```
+
+In the app, gate the rest of the UI behind a setup callout when this signal fires:
+
+```openui-lang
+data = Query("exec", {command: "node ~/.openclaw/workspace/scripts/stripe.js"}, {error: "SETUP_REQUIRED", envVar: "STRIPE_SECRET_KEY", mrr: 0})
+setupCallout = data.error == "SETUP_REQUIRED" ? Callout("info", "Setup required", "Add " + data.envVar + " to ~/.openclaw/workspace/.env, then click Refresh.") : null
+root = Stack([header, setupCallout, kpiRow, tabs])
+```
+
+The Callout renders to `null` when the key is present, so this same gate works permanently.
 
 ## Structured Workflow (follow this order)
 
@@ -416,6 +448,13 @@ viewBtn = Button("View", Action([@OpenUrl("https://example.com")]))
 - Button changes UI state (show/hide) → `@Set($variable, value)`
 - Button resets form → `@Reset($var1, $var2)`
 
+**@ToAssistant vs cron-narrative — choose deliberately.**
+Both patterns can produce the "what does this mean together?" analysis, but they have different latencies + costs. Pick based on when the user wants the answer ready:
+- **Cron writes narrative to DB → app reads it instantly.** Use when the user implies "ready when I open" — phrases like "Monday morning view", "every morning", "before standup", "weekly digest", "while I sleep", "pre-fetched". The cron prompt must read fresh metrics, generate the narrative paragraph, upsert into a `narratives(date, text, generated_at)` table. The app shows `narrativeText = @First(narratives.rows).text`. Zero click latency.
+- **@ToAssistant button → user clicks, agent generates fresh.** Use when the user says "analyze", "explain", "what's going on with X" — they want to drive the analysis at click time. Or when the analysis is contextual to a specific row (per-customer "why is this at risk?").
+- **Both** — cron seeds the morning narrative; the @ToAssistant "Refresh analysis" button regenerates ad-hoc. Best for high-stakes dashboards (founder, finance) where the user wants both the always-on baseline AND the ability to dig deeper.
+Default to **cron-narrative** for any dashboard the user implied as periodic. Default to **@ToAssistant** when the analysis is on-demand or row-scoped. Don't reach for @ToAssistant just because it's easier — paying an LLM roundtrip on every refresh of a "Monday morning view" is the wrong economics.
+
 **@ToAssistant — when the action genuinely needs AI:**
 Use ONLY when the button requires LLM analysis, not data fetching or navigation:
 ```
@@ -616,50 +655,34 @@ Always write the root = Stack(...) statement first so the UI shell appears immed
 
 ## Recipe Book
 
-Blueprints for high-value app patterns. Each recipe lists: data sources, agent enrichment, DB schema, layout, and key interactions.
+Two full recipes below: **Founder's War Room** (most-asked SaaS dashboard) and **Daily Briefing** (the cron-sync + cron-enrich pattern). For other archetypes, the table maps each to the generalizable pattern documented in this skill — assemble from those primitives.
 
-### Recipe: Growth / Analytics Dashboard
-**Use case:** Track product metrics — GitHub stars, NPM downloads, social mentions, web traffic — in one place with historical trends.
-- **Data:** Multiple `Query("exec", ...)` calling separate scripts per source (GitHub API, NPM registry, Twitter/X API, PostHog). Separate scripts = independent refresh rates.
-- **Enrichment:** Cron every 3–4h stores snapshots in SQLite. Daily cron runs full analysis (sentiment, trend deltas) via agentTurn.
-- **DB:** `metrics_snapshots` (date, stars, downloads, pageviews), `tweet_log` (tweet_id UNIQUE, text, author, sentiment, likes, views)
-- **Layout:** 4–8 KPI cards (2 rows) → Tabs (Overview | NPM | GitHub | Traffic | Social | History) → Charts + Tables per tab
-- **Interactions:** Refresh button (@Run all queries), "📸 Save Snapshot" mutation, @OpenUrl for external links, History tab reads from DB snapshots
+| Archetype | Data shape | Generalizable pattern (where it's documented) |
+|---|---|---|
+| Growth / Analytics dashboard | Multi-source `Query("exec")` per source | Independent refresh rates + manual snapshot button (see Historical trend tracking below) |
+| Social media war room | Cron-enriched mentions in DB | Pre-drafted reply Modal: `Modal(..., [TextArea(..., null, $draftReply), Buttons([Post])])` |
+| DevOps command center | gh CLI + Linear API | Threshold-tier Tag + Table+Modal drill-down (see Layout Decision Matrix) |
+| Finance / Portfolio | Positions + risk enrichment in DB | Risk-warning Cards from `agent_reasoning` field — `Card([CardHeader("⚠️"), MarkDownRenderer(item.agent_reasoning)], "sunk")` |
 
-### Recipe: Social Media War Room
-**Use case:** Monitor Twitter/Reddit/HN mentions with sentiment analysis, recommended actions, and inline reply buttons.
-- **Data:** Script fetches mentions via API (GetX, Twitter API, etc.) → returns tweets with engagement metrics
-- **Enrichment:** Cron runs agent that classifies sentiment (positive/negative/neutral), drafts replies for negative mentions, stores enriched data in DB
-- **DB:** `mentions` (id UNIQUE, text, author, sentiment, draft_reply, recommended_action, platform)
-- **Layout:** Alert bar (negative sentiment spike) → KPI cards (mentions, impressions, likes, sentiment ratio) → Tabs: Feed (Table with sentiment Tags) | Top Voices (author leaderboard) | Analytics (charts)
-- **Interactions:** "View ↑" (@OpenUrl to tweet), "Post Reply" (Mutation exec calling post script), "Like + Bookmark" (Mutation exec). For negative mentions with cron-drafted replies: show draft_reply in a Modal TextArea (pre-filled via $binding), user edits inline, taps "Post" → Mutation fires.
-- **Key pattern:** Pre-drafted reply review: `Modal("Reply", $showReply, [TextArea("reply", ..., null, $draftReply), Buttons([Button("Post", Action([@Run(postMut), ...]))])])`
-
-### Recipe: DevOps Command Center
-**Use case:** PRs, deploys, tickets, incidents — all in one surface with agent diagnosis and external mutations.
-- **Data:** Scripts calling GitHub CLI (PRs, Actions), Linear API (tickets), custom incident tracker
-- **Enrichment:** Agent generates PR summaries, incident diagnosis, and suggested fixes — stored as fields in script JSON output
-- **DB:** Optional — for incident history tracking
-- **Layout:** Alert bar (active incidents) → KPI cards with sub-indicator Tags → Tabs (PRs | Deploys | Tickets | Incidents) → Tables with Table+Modal detail pattern
-- **Interactions:** Filters ($prStatus, $ticketPriority), Table+Modal drill-down, @OpenUrl to GitHub/Linear, "Create Ticket" form in Modal with Mutation("exec") to Linear API, success Callout toast
+### Recipe: Founder's War Room (SaaS dashboard)
+**Use case:** Monday-morning founder view — MRR, growth, churn, runway, at-risk customers, AI diagnosis. Most common SaaS founder ask.
+- **Data:** Stripe (subscriptions, charges, balance) → script aggregates MRR + 30d revenue + churn rate + at-risk signals (cancellations, failed payments, revenue drops). Optional: bank API (cash position), CRM (pipeline).
+- **Enrichment:** "🧠 Analyze" button via `@ToAssistant` stitches all KPIs into ONE message — "MRR=$47k (+8%), churn=3.2%, runway=14mo, 3 at-risk customers..." — and asks the agent for a founder-level narrative ("what's working, what's not, what to prioritize this week"). The agent reads the numbers TOGETHER, not separately. This is the pattern that turns a Stripe screenshot into a diagnosis.
+- **DB:** Optional snapshot table for historical MRR/churn trend lines (cron daily). Required if "show me MRR over time" is in scope.
+- **Layout:** Setup callout (when `data.error == "SETUP_REQUIRED"`) → KPI cards (MRR / 30d revenue with growth tag / churn rate / runway / at-risk count / active subs) — TWO rows of 3 cards each → Alert bar (when at-risk > 0) → Tabs: Customers (at-risk + top-revenue tables) | Trends (MRR line from snapshots) | Diagnosis (Analyze button + narrative space).
+- **Interactions:** "Analyze" → `@ToAssistant` with all KPIs inlined. "View customer ↗" → `@OpenUrl` to Stripe dashboard. "Refresh" → `@Run` all queries. Cron 7am Monday (proactively offered: "Want me to set up a Monday 7am cron so the data's hot when you open it?").
+- **Key patterns:**
+  - **Threshold-tier Tag** (numeric thresholds, not just enums): `Tag(@Round(churn, 1) + "%", null, "sm", churn > 5 ? "danger" : churn > 2 ? "warning" : "success")`. Same for runway months, growth %, etc.
+  - **KPI analyzer button** (the killer pattern): `analyzeBtn = Button("🧠 Analyze", Action([@ToAssistant("Read these together as my founder briefing — MRR $" + data.mrr + " (" + data.growth + "% MoM), churn " + data.churn + "%, runway " + data.runway + " mo, " + @Count(data.atRisk) + " at-risk customers. What's working, what's not, what to prioritize this week?")]), "primary")`. Include enough context inline; the agent receives ONLY the @ToAssistant string.
 
 ### Recipe: Daily Briefing
-**Use case:** Morning dashboard with weather, calendar, email/message triage, and actionable buttons.
+**Use case:** Morning dashboard with weather, calendar, email/message triage, and actionable buttons. Showcases the two-stage cron pattern (sync + enrich).
 - **Data:** Two staggered cron jobs: (1) **Sync** — fetches raw data via API scripts, upserts into DB preserving existing enrichment; (2) **Enrich** — LLM agent reads un-enriched rows from DB, classifies/summarizes, writes results back.
 - **Enrichment:** Cron classifies priority + category, writes a 1-line summary per item. Enforce strict enum values in the cron prompt (e.g. "MUST be exactly one of: high, medium, low") to prevent non-standard values that break filters.
 - **DB:** Items table with enrichment columns (priority, category, summary, enriched_at). `enriched_at IS NULL` = pending.
 - **Layout:** KPI cards (row) → Tabs per data source. Show enrichment status per row (⏳ pending / ✓ done). Banner when items are awaiting enrichment.
 - **Interactions:** Reply (Modal form → Mutation), Snooze/Archive (Mutation exec + db_execute), Create (Modal form → Mutation exec → external API)
 - **Key pattern:** `stats.pending > 0 ? Callout("info", "Processing", stats.pending + " items awaiting AI enrichment.") : null`
-
-### Recipe: Finance / Portfolio Dashboard
-**Use case:** Portfolio overview with risk analysis, position monitoring, strategy performance, and news filtered to held assets.
-- **Data:** Scripts fetching portfolio positions (brokerage API or CSV), market prices (Yahoo Finance / Alpha Vantage), news (RSS/API). Each script = separate Query with independent refresh rates (prices fast, news slower).
-- **Enrichment:** Cron runs agent that analyzes positions for: correlation risk ("positions X and Y are 85% correlated"), macro event exposure ("earnings tomorrow for 3 of your holdings"), strategy drift. Stores risk_flags and agent_reasoning per position in DB.
-- **DB:** `positions` (symbol, qty, avg_cost, current_price, pnl, risk_flags, agent_reasoning, enriched_at), `price_snapshots` (date, symbol, price) for history
-- **Layout:** Alert bar (risk warnings from enrichment) → KPI cards (total value, day P&L, top gainer, top loser) → Tabs (Positions | Performance | News | Risk). Positions tab: Table with colored P&L Tags (green/red), risk_flags as warning Tags. Performance tab: AreaChart of portfolio value over time from snapshots.
-- **Interactions:** "Why?" button on risk warnings (@ToAssistant with agent_reasoning context), @OpenUrl to trading platform, news detail Modal with MarkDownRenderer
-- **Key pattern:** Risk warning cards use enrichment data: `Card([CardHeader("⚠️ Risk Alert"), MarkDownRenderer(riskItem.agent_reasoning)], "sunk")`
 
 ## Examples
 
@@ -713,113 +736,7 @@ catChart = PieChart(["Food", "Transport", "Stay", "Other"], [
 
 Key patterns: per-row delete with $delId state, PieChart with flat arrays from @Sum(@Filter), KPI cards max 3 per row.
 
-### Example 2 — Dashboard (DevOps Command Center with live exec data)
-
-E2E workflow: User asked "build a DevOps dashboard showing PRs, deploys, and tickets."
-
-Agent workflow:
-1. PLAN: 3 data sources via shell scripts (gh CLI for PRs, GitHub Actions for deploys, Linear API for tickets). No cross-dependencies.
-2. TEST: Wrote scripts, saved with `write`, ran with `exec`, verified JSON output shape.
-3. DESIGN: KPI row (3 cards), Tabs for each data source, Tables with conditional Tags, @OpenUrl for external links, Modal for details.
-4. WIRE: Status filter on PRs tab with $prStatus binding. Ticket tab has dual filters.
-
-```openui-lang
-root = Stack([header, kpiRow, tabs])
-header = Stack([CardHeader("DevOps Command Center", "Live Data"), refreshBtn], "row", "m", "center", "between")
-refreshBtn = Button("Refresh", Action([@Run(prs), @Run(deploys), @Run(tickets)]), "secondary", "normal", "small")
-
-prs = Query("exec", {command: "bash scripts/devops/prs.sh"}, [], 120)
-deploys = Query("exec", {command: "bash scripts/devops/deploys.sh"}, [], 120)
-tickets = Query("exec", {command: "bash scripts/devops/tickets.sh"}, [], 60)
-
-kpiRow = Stack([kpiPR, kpiDeploy, kpiTicket], "row", "m", "stretch")
-kpiPR = Card([TextContent("Open PRs", "small"), TextContent("" + @Count(prs), "large-heavy"), @Count(@Filter(prs, "ci_status", "==", "failing")) > 0 ? Tag("CI failing", null, "sm", "danger") : Tag("All passing", null, "sm", "success")], "sunk")
-kpiDeploy = Card([TextContent("Deploys", "small"), TextContent("" + @Count(deploys), "large-heavy")], "sunk")
-kpiTicket = Card([TextContent("Tickets", "small"), TextContent("" + @Count(tickets), "large-heavy")], "sunk")
-
-tabs = Tabs([tabPR, tabDeploy, tabTicket])
-
-$prStatus = "all"
-tabPR = TabItem("prs", "PRs (" + @Count(prs) + ")", [prFilter, prTable, prModal])
-prFilter = FormControl("Status", Select("pr_status", [SelectItem("all", "All"), SelectItem("review", "In Review"), SelectItem("approved", "Approved")], null, null, $prStatus))
-filteredPRs = $prStatus == "all" ? prs : @Filter(prs, "status", "==", $prStatus)
-prTable = Table([
-  Col("PR", @Each(filteredPRs, "p", TextContent("#" + p.id + " " + p.title, "small-heavy"))),
-  Col("CI", @Each(filteredPRs, "p", Tag(p.ci_status == "passing" ? "Pass" : "Fail", null, "sm", p.ci_status == "passing" ? "success" : "danger"))),
-  Col("", @Each(filteredPRs, "p", Stack([Button("Details", Action([@Set($selPR, "" + p.id), @Set($showPR, true)]), "secondary", "normal", "extra-small"), Button("GitHub", Action([@OpenUrl(p.url)]), "tertiary", "normal", "extra-small")], "row", "xs")))
-])
-$selPR = ""
-$showPR = false
-selPRData = @First(@Filter(prs, "id", "==", $selPR))
-prModal = Modal("PR #" + $selPR, $showPR, [
-  CardHeader(selPRData.title, selPRData.branch),
-  MarkDownRenderer(selPRData.agent_summary),
-  Buttons([Button("Open on GitHub", Action([@OpenUrl(selPRData.url)]), "primary"), Button("Close", Action([@Set($showPR, false)]), "secondary")])
-], "lg")
-
-tabDeploy = TabItem("deploys", "Deploys", [deployTable])
-deployTable = Table([
-  Col("Service", deploys.service),
-  Col("Status", @Each(deploys, "d", Tag(d.status == "live" ? "Passed" : "Failed", null, "sm", d.status == "live" ? "success" : "danger"))),
-  Col("", @Each(deploys, "d", Button("View", Action([@OpenUrl(d.url)]), "tertiary", "normal", "extra-small")))
-])
-
-tabTicket = TabItem("tickets", "Tickets", [ticketTable])
-ticketTable = Table([
-  Col("ID", @Each(tickets, "t", Button(t.id, Action([@OpenUrl(t.url)]), "tertiary", "normal", "extra-small"))),
-  Col("Title", tickets.title),
-  Col("Priority", @Each(tickets, "t", Tag(t.priority, null, "sm", t.priority == "urgent" ? "danger" : t.priority == "high" ? "warning" : "info")))
-])
-```
-
-Key patterns: exec Query with shell scripts, filter wiring with "all" option, Table + Modal detail, @OpenUrl for GitHub/Linear links, conditional Tag coloring, KPI cards max 3 per row.
-
-### Example 3 — Growth Dashboard (Multi-source + History + Snapshots)
-
-E2E workflow: User asked "build a dashboard to track our product across GitHub, NPM, and Twitter."
-
-Agent workflow:
-1. PLAN: 3 API scripts (github, npm, twitter) + SQLite for history snapshots. Manual + cron snapshot saving.
-2. TEST: Wrote each script, ran with `exec`, verified JSON output. Tested each API individually.
-3. DESIGN: KPI row (4–6 cards with null-safe display), Tabs per data source + History tab, Charts guarded with @Count.
-4. WIRE: Refresh button for all queries, snapshot mutation pulling values from live queries, history charts from DB.
-
-```openui-lang
-root = Stack([header, kpiRow, tabs])
-header = Stack([CardHeader("🚀 Growth Dashboard", "Product Metrics • Live Data"), headerBtns], "row", "m", "center", "between")
-headerBtns = Stack([refreshBtn, snapshotBtn], "row", "s")
-refreshBtn = Button("↻ Refresh", Action([@Run(gh), @Run(npm), @Run(social), @Run(history)]), "secondary", "normal", "small")
-snapshotBtn = Button("📸 Save Snapshot", Action([@Run(gh), @Run(npm), @Run(social), @Run(saveSnapshot), @Run(history)]), "primary", "normal", "small")
-
-gh = Query("exec", {command: "node scripts/github-stats.js"}, {stars: 0, forks: 0, openIssues: 0}, 300)
-npm = Query("exec", {command: "node scripts/npm-downloads.js"}, {totalDownloads: 0, packages: [], weeklyTrend: []}, 300)
-social = Query("exec", {command: "node scripts/twitter-mentions.js"}, {mentionCount: 0, totalViews: 0, totalLikes: 0, latestTweets: []}, 600)
-
-kpiRow = Stack([starsKpi, dlsKpi, mentionsKpi], "row", "m", "stretch")
-starsKpi = Card([TextContent("⭐ Stars", "small"), TextContent(gh.stars ? "" + gh.stars : "—", "large-heavy"), Tag("GitHub", null, "sm", "info")], "card", "column", "xs", "center")
-dlsKpi = Card([TextContent("📦 Downloads / mo", "small"), TextContent(npm.totalDownloads ? "" + npm.totalDownloads : "—", "large-heavy"), Tag("" + @Count(npm.packages) + " packages", null, "sm", "neutral")], "card", "column", "xs", "center")
-mentionsKpi = Card([TextContent("🐦 Mentions", "small"), TextContent(social.mentionCount ? "" + social.mentionCount : "—", "large-heavy"), Tag("Recent", null, "sm", "neutral")], "card", "column", "xs", "center")
-
-tabs = Tabs([npmTab, socialTab, historyTab])
-
-npmTab = TabItem("npm", "📦 NPM", [trendCard, pkgTable])
-trendCard = Card([CardHeader("Weekly Downloads"), @Count(npm.weeklyTrend) > 0 ? AreaChart(npm.weeklyTrend.week, [Series("Downloads", npm.weeklyTrend.downloads)], "natural") : TextContent("Loading…", "small")])
-pkgTable = Card([CardHeader("Packages"), @Count(npm.packages) > 0 ? Table([Col("Package", npm.packages.shortName), Col("Weekly", npm.packages.weekly, "number"), Col("Monthly", npm.packages.monthly, "number"), Col("", @Each(npm.packages, "p", Button("↑", Action([@OpenUrl("https://www.npmjs.com/package/" + p.name)]), "tertiary", "normal", "small")))]) : TextContent("Loading…", "small")])
-
-socialTab = TabItem("social", "🐦 Twitter", [socialKpis, tweetTable])
-socialKpis = Stack([Card([TextContent("❤️ Likes", "small"), TextContent(social.totalLikes ? "" + social.totalLikes : "—", "large-heavy")], "sunk"), Card([TextContent("👁️ Views", "small"), TextContent(social.totalViews ? "" + social.totalViews : "—", "large-heavy")], "sunk")], "row", "m", "stretch")
-tweetTable = Card([CardHeader("Latest Mentions"), @Count(social.latestTweets) > 0 ? Table([Col("Author", @Each(social.latestTweets, "t", Tag("@" + t.author, null, "sm", "info"))), Col("Tweet", social.latestTweets.text), Col("❤️", social.latestTweets.likes, "number"), Col("", @Each(social.latestTweets, "t", Button("↑", Action([@OpenUrl(t.url)]), "tertiary", "normal", "small")))]) : TextContent("No mentions found.", "small")])
-
-history = Query("db_query", {sql: "SELECT date, stars, forks, downloads, mentions FROM metrics_snapshots ORDER BY date ASC", namespace: "dashboard"}, {rows: []}, 60)
-saveSnapshot = Mutation("db_execute", {sql: "INSERT OR REPLACE INTO metrics_snapshots (date, stars, forks, downloads, mentions) VALUES (date('now'), $stars, $forks, $dls, $mentions)", params: {stars: gh.stars, forks: gh.forks, dls: npm.totalDownloads, mentions: social.mentionCount}, namespace: "dashboard"})
-
-historyTab = TabItem("history", "📈 Growth History", [histStars, histTable])
-histStars = Card([CardHeader("⭐ Stars Over Time"), @Count(history.rows) > 1 ? AreaChart(history.rows.date, [Series("Stars", history.rows.stars)], "natural") : Callout("info", "Building history…", "Save daily snapshots to see trends.")])
-histTable = Card([CardHeader("Snapshots"), @Count(history.rows) > 0 ? Table([Col("Date", history.rows.date), Col("⭐ Stars", history.rows.stars, "number"), Col("📦 Downloads", history.rows.downloads, "number"), Col("🐦 Mentions", history.rows.mentions, "number")]) : TextContent("No snapshots yet.", "small")])
-```
-
-Key patterns: null-safe KPI display (`value ? "" + value : "—"`), empty state guards (`@Count > 0 ?`), manual snapshot mutation referencing live query values, history charts from DB, multi-source scripts with independent refresh rates, Tag labels in KPI cards for context.
-
+For dashboard examples (multi-source live data, exec scripts, filters, Table+Modal drill-down, history snapshots), see the Recipe Book entries above and the patterns documented in Common Mistakes / Layout Decision Matrix.
 
 ## Edit Mode
 

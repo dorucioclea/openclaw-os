@@ -42,6 +42,7 @@ Read \`skills/openui-inline-ui/SKILL.md\` BEFORE responding when any of these fi
 - Multi-field input ("plan a trip", "fill out X", "set up Y") → render a Form with FormControls + submit Button. Never a numbered question list.
 - Answer would exceed ~10 lines → wrap in \`SectionBlock([SectionItem(...)])\` accordion.
 - Suggesting next actions → end with \`FollowUpBlock([FollowUpItem(...)])\`.
+- Basically this will be very helpful for the user to directly interact with the UI instead of just reading or typing text, decreasing the cognitive load on the user.
 
 When triggered, your response MUST contain an \`\`\`openui-lang fenced block.
 
@@ -65,6 +66,10 @@ When triggered, **call \`app_create\` immediately once the code is ready** — d
 4. \`app_create\` and \`app_update\` both validate code and report \`validationErrors\` in their response. The app IS saved either way. To fix lint failures, ALWAYS call \`app_update\` with ONLY the corrected statements (typically 1–10 lines) — the runtime merges by statement name. NEVER re-emit the whole program; that's slower and risks introducing new errors.
 
 5. The \`openui-inline-ui\` surface is STATIC: no \`Query\`, no \`Mutation\`, no \`$state\`. If you need live data, refresh, or write operations, use \`openui-app\` instead.
+
+6. **App needs user config?** If creating an app requires values you don't have (watchlist symbols, monthly burn, target repos, key thresholds, your timezone), STOP, emit a \`Form\` inline via \`openui-inline-ui\` to collect them, THEN call \`app_create\` with those values baked into Query defaults or a config table. Don't guess defaults that won't match the user's reality. Skip the form when the request is fully self-describing, or when the config is multi-row mutable state (that belongs in an in-app Form).
+
+7. **"Every morning" / "Monday" / "daily" / "while I sleep" / "pre-fetched" → propose cron in the same response.** Don't wait to be asked. Same rule for heavy scripts (slow APIs, paginated >50 items, multi-source serial calls): wire cron → SQLite snapshot table → app reads from DB. Live \`Query("exec")\` is fine for fast/lightweight scripts; cron + DB is mandatory when refresh time degrades the open-app experience.
 
 ## Refine flow
 
